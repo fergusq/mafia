@@ -1,0 +1,337 @@
+{
+	http := require("http_server")
+	case := require("case").case
+	
+	fileutil := require("fileutil")
+	mv := fileutil.mv
+	rm := fileutil.rm
+	logExec := fileutil.logExec
+	
+	sessions := new map<<Session>>
+}
+
+record Session {
+	id : integer = abs(randomInteger())
+	players : map<<Player>> = new map<<Player>>
+	state : string = "LOBBY"
+	substate : string = ""
+	cycle : list<<State>> = new list<<State>>([
+		new KillerState,
+		new DayState
+	])
+	cycle_position : integer = 0
+	broadcasts : list<<string>> = new list<<string>>
+	actions : list<<function>> = new list<<function>>
+	victims : list<<Player>> = new list<<Player>>
+	
+	function pushPlayers {
+		keys(self.players) | [self.players[_]]
+	}
+	
+	function cycleState {
+		return self.cycle[self.cycle_position%#self.cycle]
+	}
+}
+
+record Player(name) {
+	id : integer = abs(randomInteger())
+	name : string = name
+	state : string = "LOBBY"
+	role : string = ""
+}
+
+record State {
+	name : string
+	gmText : function
+	onIntro : function
+	onKill : function
+	onOutro : function
+}
+
+record KillerState : State {
+	name : string = "KILLER KILLS"
+	function gmText session {
+		return `It's night. The killer wakes up and kills.`
+	}
+	function onIntro session {
+		session.broadcasts += "The killer wakes up."
+		session.pushPlayers | { push p for p if [ p.role = "KILLER" ] } | pull killer
+		if [ killer.state = "DEAD" ] do
+			session.substate = "OUTRO"
+		else
+			killer.state = "KILL"
+			session.substate = "KILL"
+		done
+	}
+	function onKill session, player, target {
+		return FALSE unless [ player.role = "KILLER" and player.state = "KILL" ]
+		target.state = "DEAD"
+		session.victims += target
+		session.substate = "OUTRO"
+		return TRUE
+	}
+	function onOutro session {
+		session.broadcasts += "The killer sleeps."
+	}
+}
+
+record DayState : State {
+	name : string = "DAY"
+	vote : list = []
+	message : list = []
+	function gmText session {
+		return `It's day. ${session.victims[-1].name} died.`
+	}
+	function onIntro session {
+		session.pushPlayers() | p.state = "KILL" for p if [ p.state != "DEAD" ]
+		session.broadcasts += `Everybody wakes up. ${session.victims[-1].name} is dead.`
+		session.substate = "KILL"
+		self.message = []
+	}
+	function onKill session, player, target {
+		return FALSE if [ player.state != "KILL" ]
+		self.vote += target
+		n_live := #session.players - #session.victims
+		if [ #self.vote = n_live ] do
+			self.vote | unorderedCount | for p, i do
+				if [ i >= n_live/2 ] do
+					p.state = "DEAD"
+					session.victims += p
+					self.message += `${p.name} was killed.`
+					break
+				done
+			done
+			session.substate = "OUTRO"
+			self.vote = []
+		done
+		return TRUE
+	}
+	function onOutro session {
+		session.broadcasts += self.message&" " .. " Everybody sleeps."
+	}
+}
+
+record CommandController : http.Controller {
+
+	/* Game master */
+	
+	@http.handle "/cmd/new"
+	function handleNewGame request {
+		session := new Session
+		sessions[session.id] = session
+		request.send "200 OK", `{"id":${session.id}}`, mime="text/json"
+	}
+	
+	@http.handle "/cmd/broadcast/\\d+"
+	function handleBroadcast request {
+		(match("/cmd/broadcast/(\\d+)", request.path)[1:]) | pull sid
+		session := sessions[sid]
+		if [ session.state = "CYCLE" ] do
+			case session.substate | pull(matches, noMatch)
+			if matches "INTRO" do
+				(session.cycleState().onIntro) session
+			done
+			if matches "OUTRO" do
+				(session.cycleState().onOutro) session
+			done
+		done
+		if [ #session.actions > 0 ] do
+			action := session.actions[0]
+			del session.actions[0]
+			action
+		done
+		if [ #session.broadcasts > 0 ] do
+			bc := session.broadcasts[0]
+			del session.broadcasts[0]
+			id := abs(randomInteger())
+			logExec "espeak", "-s", "130", "-w", `bc$id.wav`, bc
+			logExec "oggenc", "-o", `tmp/bc$id.ogg`, `bc$id.wav`
+			rm `bc$id.wav`
+			push `/tmp/bc$id.ogg`
+		else
+			push ""
+		done | pull file
+		
+		case session.state | pull(matches, noMatch)
+		try do
+			if matches "LOBBY" do
+				push `Game id: $sid`, [`{"text":"Start game","cmd":"/cmd/start/$sid"}`]
+			done
+			if matches "NIGHT" do
+				push `It's night.`, []
+				session.state = "CYCLE"
+				session.substate = "INTRO"
+			done
+			if matches "CYCLE" do
+				push session.cycleState().gmText(session), []
+				if [ session.state = "CYCLE" and session.substate = "OUTRO" ] do
+					session.cycle_position ++
+					session.substate = "INTRO"
+				done
+			done
+		catch e
+			errprint e.message, "\n"
+		done | pull title, buttons
+		
+		request.send "200 OK", `{"title":"$title","file":"$file","buttons":[${buttons&","}]}`, mime="text/json"
+	}
+	
+	@http.handle "/cmd/start/\\d+"
+	function handleStartGame request {
+		(match("/cmd/start/(\\d+)", request.path)[1:]) | pull sid
+		session := sessions[sid]
+		/* shuffle players */
+		keys session.players |
+			[[randomInteger(), session.players[_]]] |
+			sort |
+			[_[1]] |
+			sum fst=[] |
+			pull players
+		players[0].role = "KILLER"
+		player.role = "TOWN" for player in players[1:]
+		
+		player.state = "SLEEP" for player in players
+		session.state = "NIGHT"
+		session.actions += {
+			session.broadcasts += "Everybody sleeps."
+		}
+		
+		request.send "200 OK", `{}`, mime="text/json"
+	}
+	
+	/* Player */
+	
+	@http.handle "/cmd/join"
+	function handleJoinGame request {
+		if [ request.command != "POST" ] do
+			request.send403
+			return
+		done
+		session := sessions[request.form["sid"]]
+		request.send403 unless [ session.state = "LOBBY" ]
+		player := new Player(request.form["name"])
+		player.name ~= "[^a-zåäöA-ZÅÄÖ\\- ]", ""
+		session.players[player.id] = player
+		request.send "200 OK", `{"id":${player.id}}`, mime="text/json"
+	}
+	
+	@http.handle "/cmd/render/\\d+/\\d+"
+	function handleRender request {
+		(match("/cmd/render/(\\d+)/(\\d+)", request.path)[1:]) | pull sid, pid
+		session := sessions[sid]
+		player := session.players[pid]
+		case player.state | pull(matches, noMatch)
+		{
+			if matches "LOBBY" do
+				push "Lobby", "Please wait for the game to begin.", []
+			done
+			if matches "SLEEP" do
+				push "It's night.", "Please close your eyes and wait for instructions.", []
+			done
+			if matches "WAIT" do
+				push "Please wait.", "Vote in progress.", []
+			done
+			if matches "KILL" do
+				push "Vote/Kill"
+				push "Please select your target.", [
+					session.pushPlayers() |
+					push(`{"text":"${p.name}","cmd":"/cmd/kill/$sid/$pid/${p.id}"}`) for p if [ p.state != "DEAD" ]
+				]
+			done
+			if matches "DEAD" do
+				push "Game over.", "You are dead.", []
+			done
+			if noMatch do
+				push "It's night.", "An error happened. Please wait. If the problem stays, the game is probably corrupt.", []
+			done
+		} | pull title, text, buttons
+		request.send "200 OK", `{"title":"$title","text":"$text","buttons":[${buttons&","}]}`, mime="text/json"
+	}
+	
+	@http.handle "/cmd/kill/\\d+/\\d+/\\d+"
+	function handleKill request {
+		(match("/cmd/kill/(\\d+)/(\\d+)/(\\d+)", request.path)[1:]) | pull sid, pid, tid
+		session := sessions[sid]
+		player := session.players[pid]
+		target := session.players[tid]
+		if [ session.state != "CYCLE" ] do
+			request.send403
+			return
+		done
+		if (session.cycleState().onKill) session, player, target do
+			request.send "200 OK", `{}`, mime="text/json"
+		else
+			request.send403
+		done
+	}
+
+	function handle request {
+		request.send403
+	}
+}
+
+record GameController : http.Controller {
+	@http.handle "/game/new"
+	function handleNew request {
+		request.sendFile mimeType("gm.html"), "gm.html"
+	}
+	@http.handle "/game/player\\?sid=\\d+"
+	function handleJoin request {
+		request.sendFile mimeType("player.html"), "player.html"
+	}
+	@http.handle "/game/index"
+	function handleIndex request {
+		request.sendFile mimeType("index.html"), "index.html"
+	}
+
+	function handle request {
+		request.send403
+	}
+}
+
+record StaticController : http.Controller {
+	@http.handle "/static/([^/]+)"
+	function handleStatic request {
+		matches := match("/static/([^/]+)", request.path)
+		file := "static/"..matches[1]
+		if fileExists(file) do
+			request.sendFile mimeType(file), file
+			return
+		done
+		request.send404
+	}
+	@http.handle "/tmp/([^/]+)"
+	function handleTmp request {
+		matches := match("/tmp/([^/]+)", request.path)
+		file := "tmp/"..matches[1]
+		if fileExists(file) do
+			request.sendFile mimeType(file), file
+			rm file
+			return
+		done
+		request.send404
+	}
+
+	function handle request {
+		request.send403
+	}
+}
+
+main {	
+	hs := new http.HttpServer(25565)
+	hs.controllers["/"] = http.controller({ |request|
+		request.redirect "/game/index"
+	})
+	
+	static_and_tmp := new StaticController
+	hs.controllers["/static"] = static_and_tmp
+	hs.controllers["/tmp"] = static_and_tmp
+	hs.controllers["/game"] = new GameController
+	hs.controllers["/cmd"] = new CommandController
+	
+	date = "["..[bufferedExec("date", "+%d.%m.%Y/%H:%M")][0].."]"
+	print date.." Started."
+	while true; do
+		hs.update
+	done
+}

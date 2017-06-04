@@ -1,0 +1,44 @@
+<html>
+<head>
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Mafia</title>
+	<script src="https://code.jquery.com/jquery-3.1.1.min.js" type="text/javascript"></script>
+	<link rel="stylesheet" href="/static/style.css" type="text/css">
+	<script type="text/javascript">
+		var SESSION = getURLParameter("sid");
+		var PLAYER = 0;
+		$(function() {
+			$.post( "/cmd/join", { sid: SESSION, name: prompt("What is your name?") } )
+			.done((data) => {
+				PLAYER = data.id;
+				loadRender();
+				setInterval(loadRender, 5*1000);
+			});
+		});
+		function loadRender() {
+			$.ajax( "/cmd/render/"+SESSION+"/"+PLAYER )
+			.done((data) => {
+				$("#title").text(data.title);
+				$("#text").text(data.text);
+				$("#buttons").html("");
+				for (i in data.buttons) {
+					$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();'>"+data.buttons[i].text+"</button>");
+				}
+			});
+		}
+		function disableAll() {
+			$('#buttons :button').attr("disabled", true);
+		}
+		function getURLParameter(name) {
+			return decodeURIComponent((new RegExp('[?|&]' + name + '=' + '([^&;]+?)(&|#|;|$)').exec(location.search) || [null, ''])[1].replace(/\+/g, '%20')) || null;
+		}
+	</script>
+</head>
+<body>
+	<h1 id="title">Mafia</h1>
+	<p id="text"></p>
+	<div id="buttons">
+	
+	</div>
+</body>
+</html>
