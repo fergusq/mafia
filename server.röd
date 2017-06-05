@@ -8,10 +8,16 @@
 	logExec := fileutil.logExec
 	
 	sessions := new map<<Session>>
+	session_ids := new list<<integer>>
 }
 
 record Session {
-	id : integer = abs(randomInteger())
+	id : integer = {
+		id := abs(randomInteger())%10000
+		id = abs(randomInteger())%10000 while [ id in session_ids ]
+		session_ids += id
+		return id
+	}()
 	players : map<<Player>> = new map<<Player>>
 	state : string = "LOBBY"
 	substate : string = ""
@@ -68,10 +74,12 @@ record KillerState : State {
 		target.state = "DEAD"
 		session.victims += target
 		session.substate = "OUTRO"
+		player.state = "WAIT"
 		return TRUE
 	}
 	function onOutro session {
 		session.broadcasts += "The killer sleeps."
+		session.substate = "END"
 	}
 }
 
@@ -79,14 +87,21 @@ record DayState : State {
 	name : string = "DAY"
 	vote : list = []
 	message : list = []
+	n_victims : integer = 0
+	function newVictims session {
+		new_victims := session.victims[self.n_victims:]
+		push `${v.name} died. Their role was ${v.role}.` for v in new_victims
+		push `Nobody was killed.` if [ #new_victims = 0 ]
+	}
 	function gmText session {
-		return `It's day. ${session.victims[-1].name} died.`
+		push `It's day. ${[self.newVictims(session)]&" "}`
 	}
 	function onIntro session {
 		session.pushPlayers() | p.state = "KILL" for p if [ p.state != "DEAD" ]
-		session.broadcasts += `Everybody wakes up. ${session.victims[-1].name} is dead.`
+		session.broadcasts += `Everybody wakes up. ${[self.newVictims(session)]&" "}`
 		session.substate = "KILL"
 		self.message = []
+		session.actions += { self.n_victims = #session.victims }
 	}
 	function onKill session, player, target {
 		return FALSE if [ player.state != "KILL" ]
@@ -94,20 +109,23 @@ record DayState : State {
 		n_live := #session.players - #session.victims
 		if [ #self.vote = n_live ] do
 			self.vote | unorderedCount | for p, i do
-				if [ i >= n_live/2 ] do
+				if [ i > n_live/2 ] do
 					p.state = "DEAD"
 					session.victims += p
-					self.message += `${p.name} was killed.`
+					self.message += `${p.name} was killed. Their role was ${p.role}.`
 					break
 				done
 			done
 			session.substate = "OUTRO"
 			self.vote = []
+		else
+			player.state = "WAIT"
 		done
 		return TRUE
 	}
 	function onOutro session {
 		session.broadcasts += self.message&" " .. " Everybody sleeps."
+		session.substate = "END"
 	}
 }
 
@@ -126,6 +144,10 @@ record CommandController : http.Controller {
 	function handleBroadcast request {
 		(match("/cmd/broadcast/(\\d+)", request.path)[1:]) | pull sid
 		session := sessions[sid]
+		if [ #session.actions > 0 ] do
+			action for action in session.actions
+			del session.actions[:]
+		done
 		if [ session.state = "CYCLE" ] do
 			case session.substate | pull(matches, noMatch)
 			if matches "INTRO" do
@@ -134,11 +156,6 @@ record CommandController : http.Controller {
 			if matches "OUTRO" do
 				(session.cycleState().onOutro) session
 			done
-		done
-		if [ #session.actions > 0 ] do
-			action := session.actions[0]
-			del session.actions[0]
-			action
 		done
 		if [ #session.broadcasts > 0 ] do
 			bc := session.broadcasts[0]
@@ -157,6 +174,9 @@ record CommandController : http.Controller {
 			if matches "LOBBY" do
 				push `Game id: $sid`, [`{"text":"Start game","cmd":"/cmd/start/$sid"}`]
 			done
+			if matches "INTRO" do
+				push `Please follow instructions.`
+			done
 			if matches "NIGHT" do
 				push `It's night.`, []
 				session.state = "CYCLE"
@@ -164,7 +184,7 @@ record CommandController : http.Controller {
 			done
 			if matches "CYCLE" do
 				push session.cycleState().gmText(session), []
-				if [ session.state = "CYCLE" and session.substate = "OUTRO" ] do
+				if [ session.state = "CYCLE" and session.substate = "END" ] do
 					session.cycle_position ++
 					session.substate = "INTRO"
 				done
@@ -190,11 +210,8 @@ record CommandController : http.Controller {
 		players[0].role = "KILLER"
 		player.role = "TOWN" for player in players[1:]
 		
-		player.state = "SLEEP" for player in players
-		session.state = "NIGHT"
-		session.actions += {
-			session.broadcasts += "Everybody sleeps."
-		}
+		player.state = "INTRO" for player in players
+		session.state = "INTRO"
 		
 		request.send "200 OK", `{}`, mime="text/json"
 	}
@@ -223,13 +240,21 @@ record CommandController : http.Controller {
 		case player.state | pull(matches, noMatch)
 		{
 			if matches "LOBBY" do
-				push "Lobby", "Please wait for the game to begin.", []
+				push "Please wait.", "Please wait for the game to begin.", []
+			done
+			if matches "INTRO" do
+				push "The game begins.", "Please press the button below to see your role.",
+					[`{"text":"Ready","cmd":"/cmd/ready/$sid/$pid"}`]
+			done
+			if matches "SHOW ROLE" do
+				push "Your role is", `${player.role}.<br/><br/>Press the button below when you are ready.`,
+					[`{"text":"Ready","cmd":"/cmd/ready/$sid/$pid"}`]
 			done
 			if matches "SLEEP" do
 				push "It's night.", "Please close your eyes and wait for instructions.", []
 			done
 			if matches "WAIT" do
-				push "Please wait.", "Vote in progress.", []
+				push "Please wait.", "Please wait for instructions.", []
 			done
 			if matches "KILL" do
 				push "Vote/Kill"
@@ -246,6 +271,31 @@ record CommandController : http.Controller {
 			done
 		} | pull title, text, buttons
 		request.send "200 OK", `{"title":"$title","text":"$text","buttons":[${buttons&","}]}`, mime="text/json"
+	}
+	
+	@http.handle "/cmd/ready/\\d+/\\d+"
+	function handleReady request {
+		(match("/cmd/ready/(\\d+)/(\\d+)", request.path)[1:]) | pull sid, pid
+		session := sessions[sid]
+		player := session.players[pid]
+		if [ session.state != "INTRO" ] do
+			request.send403
+			return
+		done
+		case player.state | pull(matches, noMatch)
+		if matches "INTRO" do
+			player.state = "SHOW ROLE"
+		done
+		if matches "SHOW ROLE" do
+			player.state = "SLEEP"
+			if session.pushPlayers() | [ _.state = "SLEEP" ] do
+				session.state = "NIGHT"
+				session.actions += {
+					session.broadcasts += "Everybody sleeps."
+				}
+			done
+		done
+		request.send "200 OK", `{}`, mime="text/json"
 	}
 	
 	@http.handle "/cmd/kill/\\d+/\\d+/\\d+"

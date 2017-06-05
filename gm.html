@@ -17,13 +17,13 @@
 		function loadBroadcast() {
 			$.ajax( "/cmd/broadcast/"+SESSION )
 			.done((data) => {
-				$("#title").text(data.title);
+				$("#title").html(data.title);
 				if (data.file != "") {
 					new Audio(data.file).play();
 				}
 				$("#buttons").html("");
 				for (i in data.buttons) {
-					$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();'>"+data.buttons[i].text+"</button>");
+					$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();loadRender();'>"+data.buttons[i].text+"</button>");
 				}
 			});
 		}

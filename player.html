@@ -18,11 +18,11 @@
 		function loadRender() {
 			$.ajax( "/cmd/render/"+SESSION+"/"+PLAYER )
 			.done((data) => {
-				$("#title").text(data.title);
-				$("#text").text(data.text);
+				$("#title").html(data.title);
+				$("#text").html(data.text);
 				$("#buttons").html("");
 				for (i in data.buttons) {
-					$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();'>"+data.buttons[i].text+"</button>");
+					$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();loadRender();'>"+data.buttons[i].text+"</button>");
 				}
 			});
 		}
