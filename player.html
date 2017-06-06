@@ -18,16 +18,20 @@
 		function loadRender() {
 			$.ajax( "/cmd/render/"+SESSION+"/"+PLAYER )
 			.done((data) => {
-				$("#title").html(data.title);
-				$("#text").html(data.text);
-				$("#buttons").html("");
-				for (i in data.buttons) {
-					$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();loadRender();'>"+data.buttons[i].text+"</button>");
+				if (data.change) {
+					$("#title").html(data.title);
+					$("#text").html(data.text);
+					$("#buttons").html("");
+					for (i in data.buttons) {
+						$("#buttons").append("<button onclick='$.ajax(\""+data.buttons[i].cmd+"\");disableAll();loadRender();'>"+data.buttons[i].text+"</button>");
+					}
 				}
+				$('#loading').hide();
 			});
 		}
 		function disableAll() {
 			$('#buttons :button').attr("disabled", true);
+			$('#loading').show();
 		}
 		function getURLParameter(name) {
 			return decodeURIComponent((new RegExp('[?|&]' + name + '=' + '([^&;]+?)(&|#|;|$)').exec(location.search) || [null, ''])[1].replace(/\+/g, '%20')) || null;
@@ -35,6 +39,9 @@
 	</script>
 </head>
 <body>
+	<div id="loading" style="display:none;">
+		<span>Loading...</span>
+	</div>
 	<h1 id="title">Mafia</h1>
 	<p id="text"></p>
 	<div id="buttons">

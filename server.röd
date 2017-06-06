@@ -22,13 +22,15 @@ record Session {
 	state : string = "LOBBY"
 	substate : string = ""
 	cycle : list<<State>> = new list<<State>>([
-		new KillerState,
-		new DayState
+		new MafiaState(self),
+		new KillerState(self),
+		new DayState(self)
 	])
 	cycle_position : integer = 0
 	broadcasts : list<<string>> = new list<<string>>
 	actions : list<<function>> = new list<<function>>
 	victims : list<<Player>> = new list<<Player>>
+	kill_list : list<<Player>> = new list<<Player>>
 	
 	function pushPlayers {
 		keys(self.players) | [self.players[_]]
@@ -44,9 +46,13 @@ record Player(name) {
 	name : string = name
 	state : string = "LOBBY"
 	role : string = ""
+	
+	prev_render : string = ""
 }
 
-record State {
+record State(session) {
+	session : Session = session
+	
 	name : string
 	gmText : function
 	onIntro : function
@@ -54,57 +60,129 @@ record State {
 	onOutro : function
 }
 
-record KillerState : State {
-	name : string = "KILLER KILLS"
-	function gmText session {
-		return `It's night. The killer wakes up and kills.`
+record MafiaState(session) : State(session) {
+	name : string = "MAFIA KILLS"
+	vote : list = []
+	function pushMafia {
+		session.pushPlayers | { push p for p if [ p.role = "MAFIA" ] }
 	}
-	function onIntro session {
-		session.broadcasts += "The killer wakes up."
-		session.pushPlayers | { push p for p if [ p.role = "KILLER" ] } | pull killer
-		if [ killer.state = "DEAD" ] do
-			session.substate = "OUTRO"
+	function gmText {
+		return `It's night. The mafia wakes up and kills.`
+	}
+	function onIntro {
+		if self.pushMafia | [ _.state = "DEAD" ] do
+			session.broadcasts += "The mafia is dead."
+			session.substate = "END"
 		else
-			killer.state = "KILL"
+			session.broadcasts += "The mafia wakes up."
+			self.pushMafia | p.state = "KILL" for p if [ p.state != "DEAD" ]
 			session.substate = "KILL"
 		done
 	}
-	function onKill session, player, target {
+	function onKill player, target {
+		return FALSE if [ player.state != "KILL" ]
+		player.state = "WAIT"
+		self.vote += target
+		n_mafia := #[session.pushPlayers() | filter { |p|; [p.role = "MAFIA" and p.state != "DEAD"] }]
+		errprint "Mafia kills: "..self.vote..", n="..n_mafia
+		if [ #self.vote = n_mafia ] do
+			self.vote | unorderedCount | pull p, i
+			if [ i = n_mafia ] do
+				session.kill_list += p
+				session.substate = "OUTRO"
+			else
+				self.pushMafia | p.state = "KILL" for p if [ p.state != "DEAD" ]	
+			done
+			self.vote = []
+		done
+		return TRUE
+	}
+	function onOutro {
+		self.pushMafia | p.state = "SLEEP" for p if [ p.state != "DEAD" ]
+		session.broadcasts += "The mafia sleeps."
+		session.substate = "END"
+	}
+}
+
+record KillerState(session) : State(session) {
+	name : string = "KILLER KILLS"
+	function pushKiller {
+		session.pushPlayers | { push p for p if [ p.role = "KILLER" ] }
+	}
+	function gmText {
+		return `It's night. The killer wakes up and kills.`
+	}
+	function onIntro {
+		killer := self.pushKiller()
+		if [ killer.state = "DEAD" ] do
+			session.broadcasts += "The killer is dead."
+			session.substate = "END"
+			return
+		done
+		session.broadcasts += "The killer wakes up."
+		killer.state = "KILL"
+		session.substate = "KILL"
+	}
+	function onKill player, target {
 		return FALSE unless [ player.role = "KILLER" and player.state = "KILL" ]
-		target.state = "DEAD"
-		session.victims += target
+		session.kill_list += target
 		session.substate = "OUTRO"
 		player.state = "WAIT"
 		return TRUE
 	}
-	function onOutro session {
+	function onOutro {
+		killer := self.pushKiller()
+		killer.state = "SLEEP"
 		session.broadcasts += "The killer sleeps."
 		session.substate = "END"
 	}
 }
 
-record DayState : State {
+record DayState(session) : State(session) {
 	name : string = "DAY"
 	vote : list = []
 	message : list = []
 	n_victims : integer = 0
-	function newVictims session {
+	function newVictims broadcast_nobody {
 		new_victims := session.victims[self.n_victims:]
-		push `${v.name} died. Their role was ${v.role}.` for v in new_victims
-		push `Nobody was killed.` if [ #new_victims = 0 ]
+		push `${v.name} is dead. Their role was ${v.role}.` for v in new_victims
+		push `Nobody was killed.` if [ #new_victims = 0 and broadcast_nobody ]
 	}
-	function gmText session {
-		push `It's day. ${[self.newVictims(session)]&" "}`
+	function checkWin {
+		/* Killer */
+		for role in ["KILLER", "MAFIA", "TOWN"] do
+			if session.pushPlayers | [ p.role = role or p.state = "DEAD" ] for p do
+				session.pushPlayers | p.state = "VICTORY" for p if [ p.role = role ]
+				session.broadcasts += `The $role has won.`
+				session.state = "OUTRO"
+				return TRUE
+			done
+		done
+		return FALSE
 	}
-	function onIntro session {
-		session.pushPlayers() | p.state = "KILL" for p if [ p.state != "DEAD" ]
-		session.broadcasts += `Everybody wakes up. ${[self.newVictims(session)]&" "}`
-		session.substate = "KILL"
+	function gmText {
+		push `It's day. ${[self.newVictims(FALSE)]&" "}`
+	}
+	function onIntro {
+		/* Kill players that were chosen during the night */
+		for p in session.kill_list do
+			p.state = "DEAD"
+			session.victims += p unless [ p in session.victims ]
+		done
+		del session.kill_list[:]
+		
+		session.broadcasts += `Everybody wakes up. ${[self.newVictims(TRUE)]&" "}`
 		self.message = []
 		session.actions += { self.n_victims = #session.victims }
+		
+		unless self.checkWin do
+			session.pushPlayers | p.state = "KILL" for p if [ p.state != "DEAD" ]
+			session.substate = "KILL"
+		done
 	}
-	function onKill session, player, target {
+	function onKill player, target {
 		return FALSE if [ player.state != "KILL" ]
+		player.state = "WAIT"
 		self.vote += target
 		n_live := #session.players - #session.victims
 		if [ #self.vote = n_live ] do
@@ -118,14 +196,16 @@ record DayState : State {
 			done
 			session.substate = "OUTRO"
 			self.vote = []
-		else
-			player.state = "WAIT"
 		done
 		return TRUE
 	}
-	function onOutro session {
-		session.broadcasts += self.message&" " .. " Everybody sleeps."
-		session.substate = "END"
+	function onOutro {
+		session.broadcasts += self.message&" "
+		unless self.checkWin do
+			session.pushPlayers | p.state = "SLEEP" for p if [ p.state != "DEAD" ]
+			session.broadcasts += "Everybody sleeps."
+			session.substate = "END"
+		done
 	}
 }
 
@@ -151,15 +231,15 @@ record CommandController : http.Controller {
 		if [ session.state = "CYCLE" ] do
 			case session.substate | pull(matches, noMatch)
 			if matches "INTRO" do
-				(session.cycleState().onIntro) session
+				(session.cycleState().onIntro)
 			done
 			if matches "OUTRO" do
-				(session.cycleState().onOutro) session
+				(session.cycleState().onOutro)
 			done
 		done
 		if [ #session.broadcasts > 0 ] do
-			bc := session.broadcasts[0]
-			del session.broadcasts[0]
+			bc := session.broadcasts&" "
+			del session.broadcasts[:]
 			id := abs(randomInteger())
 			logExec "espeak", "-s", "130", "-w", `bc$id.wav`, bc
 			logExec "oggenc", "-o", `tmp/bc$id.ogg`, `bc$id.wav`
@@ -175,7 +255,10 @@ record CommandController : http.Controller {
 				push `Game id: $sid`, [`{"text":"Start game","cmd":"/cmd/start/$sid"}`]
 			done
 			if matches "INTRO" do
-				push `Please follow instructions.`
+				push `Please follow instructions.`, []
+			done
+			if matches "OUTRO" do
+				push `The game ended.`, []
 			done
 			if matches "NIGHT" do
 				push `It's night.`, []
@@ -183,10 +266,13 @@ record CommandController : http.Controller {
 				session.substate = "INTRO"
 			done
 			if matches "CYCLE" do
-				push session.cycleState().gmText(session), []
+				push session.cycleState().gmText(), []
 				if [ session.state = "CYCLE" and session.substate = "END" ] do
 					session.cycle_position ++
 					session.substate = "INTRO"
+				done
+				if { [ session.state = "CYCLE" ]; session.pushPlayers | [ _.state = "DEAD" ] } do
+					session.state = "OUTRO"
 				done
 			done
 		catch e
@@ -207,8 +293,10 @@ record CommandController : http.Controller {
 			[_[1]] |
 			sum fst=[] |
 			pull players
-		players[0].role = "KILLER"
-		player.role = "TOWN" for player in players[1:]
+		n := #players
+		players[:n//3] | _.role = "MAFIA"
+		players[n//3].role = "KILLER"
+		player.role = "TOWN" for player in players[n//3+1:]
 		
 		player.state = "INTRO" for player in players
 		session.state = "INTRO"
@@ -257,11 +345,14 @@ record CommandController : http.Controller {
 				push "Please wait.", "Please wait for instructions.", []
 			done
 			if matches "KILL" do
-				push "Vote/Kill"
-				push "Please select your target.", [
+				case session.cycleState().name | pull matches2, noMatch2
+				{ push "Lynch vote", "Over 1/2 majority required" } if matches2 "DAY"
+				{ push "Kill vote", "Unanimous decision required" } if matches2 "MAFIA KILLS", "KILLER KILLS"
+				{ push "Vote", "Select the target" } if noMatch
+				push([
 					session.pushPlayers() |
 					push(`{"text":"${p.name}","cmd":"/cmd/kill/$sid/$pid/${p.id}"}`) for p if [ p.state != "DEAD" ]
-				]
+				])
 			done
 			if matches "DEAD" do
 				push "Game over.", "You are dead.", []
@@ -270,7 +361,10 @@ record CommandController : http.Controller {
 				push "It's night.", "An error happened. Please wait. If the problem stays, the game is probably corrupt.", []
 			done
 		} | pull title, text, buttons
-		request.send "200 OK", `{"title":"$title","text":"$text","buttons":[${buttons&","}]}`, mime="text/json"
+		content := `"title":"$title","text":"$text","buttons":[${buttons&","}]`
+		change := push("true") if [ player.prev_render != content ] else push("false")
+		player.prev_render = content
+		request.send "200 OK", `{"change":$change,$content}`, mime="text/json"
 	}
 	
 	@http.handle "/cmd/ready/\\d+/\\d+"
@@ -288,7 +382,7 @@ record CommandController : http.Controller {
 		done
 		if matches "SHOW ROLE" do
 			player.state = "SLEEP"
-			if session.pushPlayers() | [ _.state = "SLEEP" ] do
+			if session.pushPlayers | [ _.state = "SLEEP" ] do
 				session.state = "NIGHT"
 				session.actions += {
 					session.broadcasts += "Everybody sleeps."
@@ -308,7 +402,7 @@ record CommandController : http.Controller {
 			request.send403
 			return
 		done
-		if (session.cycleState().onKill) session, player, target do
+		if (session.cycleState().onKill) player, target do
 			request.send "200 OK", `{}`, mime="text/json"
 		else
 			request.send403
