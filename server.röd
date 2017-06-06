@@ -33,6 +33,7 @@ record Session {
 	actions : list<<function>> = new list<<function>>
 	victims : list<<Player>> = new list<<Player>>
 	kill_list : list<<Player>> = new list<<Player>>
+	heal_list : list<<Player>> = new list<<Player>>
 	
 	function pushPlayers {
 		keys(self.players) | [self.players[_]]
@@ -163,7 +164,7 @@ record DoctorState(session) : State(session) {
 	}
 	function onKill player, target {
 		return FALSE unless [ player.role = "DOCTOR" and player.state = "KILL" ]
-		session.kill_list -= target
+		session.heal_list += target
 		session.substate = "OUTRO"
 		player.state = "WAIT"
 		return TRUE
@@ -247,9 +248,10 @@ record DayState(session) : State(session) {
 		/* Kill players that were chosen during the night */
 		for p in session.kill_list do
 			p.state = "DEAD"
-			session.victims += p unless [ p in session.victims ]
+			session.victims += p unless [ p in session.victims or p in session.heal_list ]
 		done
 		del session.kill_list[:]
+		del session.heal_list[:]
 		
 		session.broadcasts += `Everybody wakes up. ${[self.newVictims(TRUE)]&" "}`
 		self.message = []
