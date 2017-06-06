@@ -24,6 +24,8 @@ record Session {
 	cycle : list<<State>> = new list<<State>>([
 		new MafiaState(self),
 		new KillerState(self),
+		new InvestigatorState(self),
+		new DoctorState(self),
 		new DayState(self)
 	])
 	cycle_position : integer = 0
@@ -46,6 +48,7 @@ record Player(name) {
 	name : string = name
 	state : string = "LOBBY"
 	role : string = ""
+	info : string = ""
 	
 	prev_render : string = ""
 }
@@ -56,7 +59,8 @@ record State(session) {
 	name : string
 	gmText : function
 	onIntro : function
-	onKill : function
+	onKill : function = { return FALSE }
+	onOK : function = { return FALSE }
 	onOutro : function
 }
 
@@ -134,6 +138,82 @@ record KillerState(session) : State(session) {
 		killer := self.pushKiller()
 		killer.state = "SLEEP"
 		session.broadcasts += "The killer sleeps."
+		session.substate = "END"
+	}
+}
+
+record DoctorState(session) : State(session) {
+	name : string = "DOCTOR HEALS"
+	function pushDoctor {
+		session.pushPlayers | { push p for p if [ p.role = "DOCTOR" ] }
+	}
+	function gmText {
+		return `It's night. The doctor wakes up and heals.`
+	}
+	function onIntro {
+		player := self.pushDoctor()
+		if [ player.state = "DEAD" ] do
+			session.broadcasts += "The doctor is dead."
+			session.substate = "END"
+			return
+		done
+		session.broadcasts += "The doctor wakes up."
+		player.state = "KILL"
+		session.substate = "KILL"
+	}
+	function onKill player, target {
+		return FALSE unless [ player.role = "DOCTOR" and player.state = "KILL" ]
+		session.kill_list -= target
+		session.substate = "OUTRO"
+		player.state = "WAIT"
+		return TRUE
+	}
+	function onOutro {
+		player := self.pushDoctor()
+		player.state = "SLEEP"
+		session.broadcasts += "The doctor sleeps."
+		session.substate = "END"
+	}
+}
+
+record InvestigatorState(session) : State(session) {
+	name : string = "INVESTIGATION"
+	function pushInvestigator {
+		session.pushPlayers | { push p for p if [ p.role = "INVESTIGATOR" ] }
+	}
+	function gmText {
+		return `It's night. The investigator wakes up.`
+	}
+	function onIntro {
+		player := self.pushInvestigator()
+		if [ player.state = "DEAD" ] do
+			session.broadcasts += "The investigator is dead."
+			session.substate = "END"
+			return
+		done
+		session.broadcasts += "The investigator wakes up."
+		player.state = "KILL"
+		session.substate = "KILL"
+	}
+	function onKill player, target {
+		return FALSE unless [ player.role = "INVESTIGATOR" and player.state = "KILL" ]
+		session.substate = "INFO"
+		player.state = "INFO"
+		player.info = `${target.name} is MAFIA.` if [ target.role = "MAFIA" ]
+		player.info = `${target.name} is NOT MAFIA.` if [ target.role != "MAFIA" ]
+		return TRUE
+	}
+	function onOK player {
+		return FALSE unless [ player.role = "INVESTIGATOR" and player.state = "INFO" ]
+		session.substate = "OUTRO"
+		player.state = "WAIT"
+		player.info = ""
+		return TRUE
+	}
+	function onOutro {
+		player := self.pushInvestigator()
+		player.state = "SLEEP"
+		session.broadcasts += "The investigator sleeps."
 		session.substate = "END"
 	}
 }
@@ -252,7 +332,10 @@ record CommandController : http.Controller {
 		case session.state | pull(matches, noMatch)
 		try do
 			if matches "LOBBY" do
-				push `Game id: $sid`, [`{"text":"Start game","cmd":"/cmd/start/$sid"}`]
+				n := #session.players
+				push `Game id: $sid Players: $n`
+				push([`{"text":"Start game","cmd":"/cmd/start/$sid"}`]) if [ n >= 4 ]
+				push([]) if [ n < 4 ]
 			done
 			if matches "INTRO" do
 				push `Please follow instructions.`, []
@@ -296,7 +379,9 @@ record CommandController : http.Controller {
 		n := #players
 		players[:n//3] | _.role = "MAFIA"
 		players[n//3].role = "KILLER"
-		player.role = "TOWN" for player in players[n//3+1:]
+		players[n//3+1].role = "INVESTIGATOR"
+		players[n//3+2].role = "DOCTOR"
+		player.role = "TOWN" for player in players[n//3+3:]
 		
 		player.state = "INTRO" for player in players
 		session.state = "INTRO"
@@ -344,11 +429,16 @@ record CommandController : http.Controller {
 			if matches "WAIT" do
 				push "Please wait.", "Please wait for instructions.", []
 			done
+			if matches "INFO" do
+				push "Info.", player.info, [`{"text":"OK","cmd":"/cmd/ok/$sid/$pid"}`]
+			done
 			if matches "KILL" do
 				case session.cycleState().name | pull matches2, noMatch2
-				{ push "Lynch vote", "Over 1/2 majority required" } if matches2 "DAY"
-				{ push "Kill vote", "Unanimous decision required" } if matches2 "MAFIA KILLS", "KILLER KILLS"
-				{ push "Vote", "Select the target" } if noMatch
+				{ push "Lynch vote.", "Over 1/2 majority required." } if matches2 "DAY"
+				{ push "Kill vote.", "Unanimous decision required." } if matches2 "MAFIA KILLS", "KILLER KILLS"
+				{ push "Select target.", "You will be told if the target is a member of the mafia." } if matches2 "INVESTIGATION"
+				{ push "Select target.", "The person you choose cannot die during this night." } if matches2 "DOCTOR HEALS"
+				{ push "Vote.", "Select the target." } if noMatch2
 				push([
 					session.pushPlayers() |
 					push(`{"text":"${p.name}","cmd":"/cmd/kill/$sid/$pid/${p.id}"}`) for p if [ p.state != "DEAD" ]
@@ -357,8 +447,11 @@ record CommandController : http.Controller {
 			if matches "DEAD" do
 				push "Game over.", "You are dead.", []
 			done
+			if matches "VICTORY" do
+				push "Victory.", "You are a member of the winning party.", []
+			done
 			if noMatch do
-				push "It's night.", "An error happened. Please wait. If the problem stays, the game is probably corrupt.", []
+				push "Error.", "An error happened. Please wait. If the problem stays, the game is probably corrupt.", []
 			done
 		} | pull title, text, buttons
 		content := `"title":"$title","text":"$text","buttons":[${buttons&","}]`
@@ -403,6 +496,22 @@ record CommandController : http.Controller {
 			return
 		done
 		if (session.cycleState().onKill) player, target do
+			request.send "200 OK", `{}`, mime="text/json"
+		else
+			request.send403
+		done
+	}
+	
+	@http.handle "/cmd/ok/\\d+/\\d+"
+	function handleOK request {
+		(match("/cmd/ok/(\\d+)/(\\d+)", request.path)[1:]) | pull sid, pid
+		session := sessions[sid]
+		player := session.players[pid]
+		if [ session.state != "CYCLE" ] do
+			request.send403
+			return
+		done
+		if (session.cycleState().onOK) player do
 			request.send "200 OK", `{}`, mime="text/json"
 		else
 			request.send403
