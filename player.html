@@ -8,11 +8,19 @@
 		var SESSION = getURLParameter("sid");
 		var PLAYER = 0;
 		$(function() {
-			$.post( "/cmd/join", { sid: SESSION, name: prompt("What is your name?") } )
-			.done((data) => {
-				PLAYER = data.id;
-				loadRender();
-				setInterval(loadRender, 5*1000);
+			$.ajax( "/cmd/canjoin/"+SESSION )
+			.done((result) => {
+				if (result.result) {
+					$.post( "/cmd/join", { sid: SESSION, name: prompt("What is your name?") } )
+					.done((data) => {
+						PLAYER = data.id;
+						loadRender();
+						setInterval(loadRender, 5*1000);
+					});
+				} else {
+					$("#title").text("Unknown game id.");
+					$("#text").html("<a href=\"/game/index\">Back to front page.</a>");
+				}
 			});
 		});
 		function loadRender() {

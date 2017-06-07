@@ -24,7 +24,7 @@ record Session {
 	cycle : list<<State>> = new list<<State>>([
 		new MafiaState(self),
 		new KillerState(self),
-		new InvestigatorState(self),
+		new DetectiveState(self),
 		new DoctorState(self),
 		new DayState(self)
 	])
@@ -177,27 +177,27 @@ record DoctorState(session) : State(session) {
 	}
 }
 
-record InvestigatorState(session) : State(session) {
+record DetectiveState(session) : State(session) {
 	name : string = "INVESTIGATION"
-	function pushInvestigator {
-		session.pushPlayers | { push p for p if [ p.role = "INVESTIGATOR" ] }
+	function pushDetective {
+		session.pushPlayers | { push p for p if [ p.role = "DETECTIVE" ] }
 	}
 	function gmText {
-		return `It's night. The investigator wakes up.`
+		return `It's night. The detective wakes up.`
 	}
 	function onIntro {
-		player := self.pushInvestigator()
+		player := self.pushDetective()
 		if [ player.state = "DEAD" ] do
-			session.broadcasts += "The investigator is dead."
+			session.broadcasts += "The detective is dead."
 			session.substate = "END"
 			return
 		done
-		session.broadcasts += "The investigator wakes up."
+		session.broadcasts += "The detective wakes up."
 		player.state = "KILL"
 		session.substate = "KILL"
 	}
 	function onKill player, target {
-		return FALSE unless [ player.role = "INVESTIGATOR" and player.state = "KILL" ]
+		return FALSE unless [ player.role = "DETECTIVE" and player.state = "KILL" ]
 		session.substate = "INFO"
 		player.state = "INFO"
 		player.info = `${target.name} is MAFIA.` if [ target.role = "MAFIA" ]
@@ -205,16 +205,16 @@ record InvestigatorState(session) : State(session) {
 		return TRUE
 	}
 	function onOK player {
-		return FALSE unless [ player.role = "INVESTIGATOR" and player.state = "INFO" ]
+		return FALSE unless [ player.role = "DETECTIVE" and player.state = "INFO" ]
 		session.substate = "OUTRO"
 		player.state = "WAIT"
 		player.info = ""
 		return TRUE
 	}
 	function onOutro {
-		player := self.pushInvestigator()
+		player := self.pushDetective()
 		player.state = "SLEEP"
-		session.broadcasts += "The investigator sleeps."
+		session.broadcasts += "The detective sleeps."
 		session.substate = "END"
 	}
 }
@@ -247,8 +247,10 @@ record DayState(session) : State(session) {
 	function onIntro {
 		/* Kill players that were chosen during the night */
 		for p in session.kill_list do
-			p.state = "DEAD"
-			session.victims += p unless [ p in session.victims or p in session.heal_list ]
+			unless [ p in session.heal_list ] do
+				p.state = "DEAD"
+				session.victims += p unless [ p in session.victims ]
+			done
 		done
 		del session.kill_list[:]
 		del session.heal_list[:]
@@ -381,7 +383,7 @@ record CommandController : http.Controller {
 		n := #players
 		players[:n//3] | _.role = "MAFIA"
 		players[n//3].role = "KILLER"
-		players[n//3+1].role = "INVESTIGATOR"
+		players[n//3+1].role = "DETECTIVE"
 		players[n//3+2].role = "DOCTOR"
 		player.role = "TOWN" for player in players[n//3+3:]
 		
@@ -392,6 +394,18 @@ record CommandController : http.Controller {
 	}
 	
 	/* Player */
+	
+	@http.handle "/cmd/canjoin/\\d+"
+	function handleCanJoinGame request {
+		(match("/cmd/canjoin/(\\d+)", request.path)[1:]) | pull sid
+		result := "true"
+		if [ sessions[sid]? ] do
+			result = "false" unless [ sessions[sid].state = "LOBBY" ]
+		else
+			result = "false"
+		done
+		request.send "200 OK", `{"result":$result}`, mime="text/json"
+	}
 	
 	@http.handle "/cmd/join"
 	function handleJoinGame request {
