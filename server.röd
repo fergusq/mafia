@@ -52,6 +52,13 @@ record Player(name) {
 	info : string = ""
 	
 	prev_render : string = ""
+	
+	function party {
+		case self.role | pull matches, noMatch
+		return "MAFIA" if matches "MAFIA"
+		return "KILLER" if matches "KILLER"
+		return "TOWN" if noMatch
+	}
 }
 
 record State(session) {
@@ -231,10 +238,10 @@ record DayState(session) : State(session) {
 	}
 	function checkWin {
 		/* Killer */
-		for role in ["KILLER", "MAFIA", "TOWN"] do
-			if session.pushPlayers | [ p.role = role or p.state = "DEAD" ] for p do
-				session.pushPlayers | p.state = "VICTORY" for p if [ p.role = role ]
-				session.broadcasts += `The $role has won.`
+		for party in ["KILLER", "MAFIA", "TOWN"] do
+			if session.pushPlayers | [ p.party() = party or p.state = "DEAD" ] for p do
+				session.pushPlayers | p.state = "VICTORY" for p if [ p.party() = party ]
+				session.broadcasts += `The $party has won.`
 				session.state = "OUTRO"
 				return TRUE
 			done
@@ -385,7 +392,7 @@ record CommandController : http.Controller {
 		players[n//3].role = "KILLER"
 		players[n//3+1].role = "DETECTIVE"
 		players[n//3+2].role = "DOCTOR"
-		player.role = "TOWN" for player in players[n//3+3:]
+		players[n//3+3:] | _.role = "TOWN"
 		
 		player.state = "INTRO" for player in players
 		session.state = "INTRO"
