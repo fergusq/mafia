@@ -66,6 +66,7 @@ record State(session) {
 	
 	name : string
 	gmText : function
+	killTexts : function
 	onIntro : function
 	onKill : function = { return FALSE }
 	onOK : function = { return FALSE }
@@ -80,6 +81,9 @@ record MafiaState(session) : State(session) {
 	}
 	function gmText {
 		return `It's night. The mafia wakes up and kills.`
+	}
+	function killTexts {
+		return "Kill vote.", "Unanimous decision required."
 	}
 	function onIntro {
 		if self.pushMafia | [ _.state = "DEAD" ] do
@@ -124,6 +128,9 @@ record KillerState(session) : State(session) {
 	function gmText {
 		return `It's night. The killer wakes up and kills.`
 	}
+	function killTexts {
+		return "Select target.", "The selected person will be killed."
+	}
 	function onIntro {
 		killer := self.pushKiller()
 		if [ killer.state = "DEAD" ] do
@@ -158,6 +165,9 @@ record DoctorState(session) : State(session) {
 	function gmText {
 		return `It's night. The doctor wakes up and heals.`
 	}
+	function killTexts {
+		return "Select target.", "The person you choose cannot die during this night."
+	}
 	function onIntro {
 		player := self.pushDoctor()
 		if [ player.state = "DEAD" ] do
@@ -191,6 +201,9 @@ record DetectiveState(session) : State(session) {
 	}
 	function gmText {
 		return `It's night. The detective wakes up.`
+	}
+	function killTexts {
+		return "Select target.", "You will be told if the target is a member of the mafia."
 	}
 	function onIntro {
 		player := self.pushDetective()
@@ -237,10 +250,12 @@ record DayState(session) : State(session) {
 		push `Nobody was killed.` if [ #new_victims = 0 and broadcast_nobody ]
 	}
 	function checkWin {
-		/* Killer */
 		for party in ["KILLER", "MAFIA", "TOWN"] do
 			if session.pushPlayers | [ p.party() = party or p.state = "DEAD" ] for p do
-				session.pushPlayers | p.state = "VICTORY" for p if [ p.party() = party ]
+				session.pushPlayers | for p do
+					p.state = "VICTORY" if [ p.party() = party ]
+					p.state = "DEFEAT" if [ p.party() != party ]
+				done
 				session.broadcasts += `The $party has won.`
 				session.state = "OUTRO"
 				return TRUE
@@ -249,7 +264,10 @@ record DayState(session) : State(session) {
 		return FALSE
 	}
 	function gmText {
-		push `It's day. ${[self.newVictims(FALSE)]&" "}`
+		return `It's day. ${[self.newVictims(FALSE)]&" "}`
+	}
+	function killTexts {
+		return "Lynch vote.", "Over 1/2 majority required."
 	}
 	function onIntro {
 		/* Kill players that were chosen during the night */
@@ -320,7 +338,7 @@ record CommandController : http.Controller {
 			del session.actions[:]
 		done
 		if [ session.state = "CYCLE" ] do
-			case session.substate | pull(matches, noMatch)
+			case session.substate | pull matches, noMatch
 			if matches "INTRO" do
 				(session.cycleState().onIntro)
 			done
@@ -340,7 +358,7 @@ record CommandController : http.Controller {
 			push ""
 		done | pull file
 		
-		case session.state | pull(matches, noMatch)
+		case session.state | pull matches, noMatch
 		try do
 			if matches "LOBBY" do
 				n := #session.players
@@ -433,7 +451,7 @@ record CommandController : http.Controller {
 		(match("/cmd/render/(\\d+)/(\\d+)", request.path)[1:]) | pull sid, pid
 		session := sessions[sid]
 		player := session.players[pid]
-		case player.state | pull(matches, noMatch)
+		case player.state | pull matches, noMatch
 		{
 			if matches "LOBBY" do
 				push "Please wait.", "Please wait for the game to begin.", []
@@ -456,12 +474,7 @@ record CommandController : http.Controller {
 				push "Info.", player.info, [`{"text":"OK","cmd":"/cmd/ok/$sid/$pid"}`]
 			done
 			if matches "KILL" do
-				case session.cycleState().name | pull matches2, noMatch2
-				{ push "Lynch vote.", "Over 1/2 majority required." } if matches2 "DAY"
-				{ push "Kill vote.", "Unanimous decision required." } if matches2 "MAFIA KILLS", "KILLER KILLS"
-				{ push "Select target.", "You will be told if the target is a member of the mafia." } if matches2 "INVESTIGATION"
-				{ push "Select target.", "The person you choose cannot die during this night." } if matches2 "DOCTOR HEALS"
-				{ push "Vote.", "Select the target." } if noMatch2
+				(session.cycleState().killTexts)
 				push([
 					session.pushPlayers() |
 					push(`{"text":"${p.name}","cmd":"/cmd/kill/$sid/$pid/${p.id}"}`) for p if [ p.state != "DEAD" ]
@@ -472,6 +485,9 @@ record CommandController : http.Controller {
 			done
 			if matches "VICTORY" do
 				push "Victory.", "You are a member of the winning party.", []
+			done
+			if matches "DEFEAT" do
+				push "Defeat.", "You are a member of the losing party.", []
 			done
 			if noMatch do
 				push "Error.", "An error happened. Please wait. If the problem stays, the game is probably corrupt.", []
@@ -492,7 +508,7 @@ record CommandController : http.Controller {
 			request.send403
 			return
 		done
-		case player.state | pull(matches, noMatch)
+		case player.state | pull matches, noMatch
 		if matches "INTRO" do
 			player.state = "SHOW ROLE"
 		done
