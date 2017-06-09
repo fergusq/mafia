@@ -1,0 +1,83 @@
+{
+	/*     Role      Party */
+	roles["TOWN"] = "TOWN"
+}
+
+record DayState(session) : State(session) {
+	name : string = "DAY"
+	vote : list = []
+	message : list = []
+	n_victims : integer = 0
+	function newVictims broadcast_nobody {
+		new_victims := session.victims[self.n_victims:]
+		push `${v.name} is dead. Their role was ${v.role}.` for v in new_victims
+		push `Nobody was killed.` if [ #new_victims = 0 and broadcast_nobody ]
+	}
+	function checkWin {
+		for party in ["KILLER", "MAFIA", "TOWN"] do
+			if session.pushPlayers | [ p.party() = party or p.state = "DEAD" ] for p do
+				session.pushPlayers | for p do
+					p.state = "VICTORY" if [ p.party() = party ]
+					p.state = "DEFEAT" if [ p.party() != party ]
+				done
+				session.broadcasts += `The $party has won.`
+				session.state = "OUTRO"
+				return TRUE
+			done
+		done
+		return FALSE
+	}
+	function gmText {
+		return `It's day. ${[self.newVictims(FALSE)]&" "}`
+	}
+	function killTexts {
+		return "Lynch vote.", "Over 1/2 majority required."
+	}
+	function onIntro {
+		/* Kill players that were chosen during the night */
+		for p in session.kill_list do
+			unless [ p in session.heal_list ] do
+				p.state = "DEAD"
+				session.victims += p unless [ p in session.victims ]
+			done
+		done
+		del session.kill_list[:]
+		del session.heal_list[:]
+		
+		session.broadcasts += `Everybody wakes up. ${[self.newVictims(TRUE)]&" "}`
+		self.message = []
+		session.actions += { self.n_victims = #session.victims }
+		
+		unless self.checkWin do
+			session.pushPlayers | p.state = "KILL" for p if [ p.state != "DEAD" ]
+			session.substate = "KILL"
+		done
+	}
+	function onKill player, target {
+		return FALSE if [ player.state != "KILL" ]
+		player.state = "WAIT"
+		self.vote += target
+		n_live := #session.players - #session.victims
+		if [ #self.vote = n_live ] do
+			self.vote | unorderedCount | for p, i do
+				if [ i > n_live/2 ] do
+					p.state = "DEAD"
+					session.victims += p
+					self.message += `${p.name} was killed. Their role was ${p.role}.`
+					break
+				done
+			done
+			session.substate = "OUTRO"
+			self.vote = []
+		done
+		return TRUE
+	}
+	function onOutro {
+		session.broadcasts += self.message&" "
+		unless self.checkWin do
+			session.pushPlayers | p.state = "SLEEP" for p if [ p.state != "DEAD" ]
+			session.broadcasts += "Everybody sleeps."
+			session.substate = "END"
+		done
+	}
+}

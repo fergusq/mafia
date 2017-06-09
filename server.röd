@@ -9,6 +9,15 @@
 	
 	sessions := new map<<Session>>
 	session_ids := new list<<integer>>
+	
+	/* map from role to party */
+	roles := new map<<string>>
+	
+	localImport "day_state.röd"
+	localImport "detective_state.röd"
+	localImport "doctor_state.röd"
+	localImport "killer_state.röd"
+	localImport "mafia_state.röd"
 }
 
 record Session {
@@ -54,10 +63,7 @@ record Player(name) {
 	prev_render : string = ""
 	
 	function party {
-		case self.role | pull matches, noMatch
-		return "MAFIA" if matches "MAFIA"
-		return "KILLER" if matches "KILLER"
-		return "TOWN" if noMatch
+		return roles[self.role]
 	}
 }
 
@@ -71,251 +77,6 @@ record State(session) {
 	onKill : function = { return FALSE }
 	onOK : function = { return FALSE }
 	onOutro : function
-}
-
-record MafiaState(session) : State(session) {
-	name : string = "MAFIA KILLS"
-	vote : list = []
-	function pushMafia {
-		session.pushPlayers | { push p for p if [ p.role = "MAFIA" ] }
-	}
-	function gmText {
-		return `It's night. The mafia wakes up and kills.`
-	}
-	function killTexts {
-		return "Kill vote.", "Unanimous decision required."
-	}
-	function onIntro {
-		if self.pushMafia | [ _.state = "DEAD" ] do
-			session.broadcasts += "The mafia is dead."
-			session.substate = "END"
-		else
-			session.broadcasts += "The mafia wakes up."
-			self.pushMafia | p.state = "KILL" for p if [ p.state != "DEAD" ]
-			session.substate = "KILL"
-		done
-	}
-	function onKill player, target {
-		return FALSE if [ player.state != "KILL" ]
-		player.state = "WAIT"
-		self.vote += target
-		n_mafia := #[session.pushPlayers() | filter { |p|; [p.role = "MAFIA" and p.state != "DEAD"] }]
-		errprint "Mafia kills: "..self.vote..", n="..n_mafia
-		if [ #self.vote = n_mafia ] do
-			self.vote | unorderedCount | pull p, i
-			if [ i = n_mafia ] do
-				session.kill_list += p
-				session.substate = "OUTRO"
-			else
-				self.pushMafia | p.state = "KILL" for p if [ p.state != "DEAD" ]	
-			done
-			self.vote = []
-		done
-		return TRUE
-	}
-	function onOutro {
-		self.pushMafia | p.state = "SLEEP" for p if [ p.state != "DEAD" ]
-		session.broadcasts += "The mafia sleeps."
-		session.substate = "END"
-	}
-}
-
-record KillerState(session) : State(session) {
-	name : string = "KILLER KILLS"
-	function pushKiller {
-		session.pushPlayers | { push p for p if [ p.role = "KILLER" ] }
-	}
-	function gmText {
-		return `It's night. The killer wakes up and kills.`
-	}
-	function killTexts {
-		return "Select target.", "The selected person will be killed."
-	}
-	function onIntro {
-		killer := self.pushKiller()
-		if [ killer.state = "DEAD" ] do
-			session.broadcasts += "The killer is dead."
-			session.substate = "END"
-			return
-		done
-		session.broadcasts += "The killer wakes up."
-		killer.state = "KILL"
-		session.substate = "KILL"
-	}
-	function onKill player, target {
-		return FALSE unless [ player.role = "KILLER" and player.state = "KILL" ]
-		session.kill_list += target
-		session.substate = "OUTRO"
-		player.state = "WAIT"
-		return TRUE
-	}
-	function onOutro {
-		killer := self.pushKiller()
-		killer.state = "SLEEP"
-		session.broadcasts += "The killer sleeps."
-		session.substate = "END"
-	}
-}
-
-record DoctorState(session) : State(session) {
-	name : string = "DOCTOR HEALS"
-	function pushDoctor {
-		session.pushPlayers | { push p for p if [ p.role = "DOCTOR" ] }
-	}
-	function gmText {
-		return `It's night. The doctor wakes up and heals.`
-	}
-	function killTexts {
-		return "Select target.", "The person you choose cannot die during this night."
-	}
-	function onIntro {
-		player := self.pushDoctor()
-		if [ player.state = "DEAD" ] do
-			session.broadcasts += "The doctor is dead."
-			session.substate = "END"
-			return
-		done
-		session.broadcasts += "The doctor wakes up."
-		player.state = "KILL"
-		session.substate = "KILL"
-	}
-	function onKill player, target {
-		return FALSE unless [ player.role = "DOCTOR" and player.state = "KILL" ]
-		session.heal_list += target
-		session.substate = "OUTRO"
-		player.state = "WAIT"
-		return TRUE
-	}
-	function onOutro {
-		player := self.pushDoctor()
-		player.state = "SLEEP"
-		session.broadcasts += "The doctor sleeps."
-		session.substate = "END"
-	}
-}
-
-record DetectiveState(session) : State(session) {
-	name : string = "INVESTIGATION"
-	function pushDetective {
-		session.pushPlayers | { push p for p if [ p.role = "DETECTIVE" ] }
-	}
-	function gmText {
-		return `It's night. The detective wakes up.`
-	}
-	function killTexts {
-		return "Select target.", "You will be told if the target is a member of the mafia."
-	}
-	function onIntro {
-		player := self.pushDetective()
-		if [ player.state = "DEAD" ] do
-			session.broadcasts += "The detective is dead."
-			session.substate = "END"
-			return
-		done
-		session.broadcasts += "The detective wakes up."
-		player.state = "KILL"
-		session.substate = "KILL"
-	}
-	function onKill player, target {
-		return FALSE unless [ player.role = "DETECTIVE" and player.state = "KILL" ]
-		session.substate = "INFO"
-		player.state = "INFO"
-		player.info = `${target.name} is MAFIA.` if [ target.role = "MAFIA" ]
-		player.info = `${target.name} is NOT MAFIA.` if [ target.role != "MAFIA" ]
-		return TRUE
-	}
-	function onOK player {
-		return FALSE unless [ player.role = "DETECTIVE" and player.state = "INFO" ]
-		session.substate = "OUTRO"
-		player.state = "WAIT"
-		player.info = ""
-		return TRUE
-	}
-	function onOutro {
-		player := self.pushDetective()
-		player.state = "SLEEP"
-		session.broadcasts += "The detective sleeps."
-		session.substate = "END"
-	}
-}
-
-record DayState(session) : State(session) {
-	name : string = "DAY"
-	vote : list = []
-	message : list = []
-	n_victims : integer = 0
-	function newVictims broadcast_nobody {
-		new_victims := session.victims[self.n_victims:]
-		push `${v.name} is dead. Their role was ${v.role}.` for v in new_victims
-		push `Nobody was killed.` if [ #new_victims = 0 and broadcast_nobody ]
-	}
-	function checkWin {
-		for party in ["KILLER", "MAFIA", "TOWN"] do
-			if session.pushPlayers | [ p.party() = party or p.state = "DEAD" ] for p do
-				session.pushPlayers | for p do
-					p.state = "VICTORY" if [ p.party() = party ]
-					p.state = "DEFEAT" if [ p.party() != party ]
-				done
-				session.broadcasts += `The $party has won.`
-				session.state = "OUTRO"
-				return TRUE
-			done
-		done
-		return FALSE
-	}
-	function gmText {
-		return `It's day. ${[self.newVictims(FALSE)]&" "}`
-	}
-	function killTexts {
-		return "Lynch vote.", "Over 1/2 majority required."
-	}
-	function onIntro {
-		/* Kill players that were chosen during the night */
-		for p in session.kill_list do
-			unless [ p in session.heal_list ] do
-				p.state = "DEAD"
-				session.victims += p unless [ p in session.victims ]
-			done
-		done
-		del session.kill_list[:]
-		del session.heal_list[:]
-		
-		session.broadcasts += `Everybody wakes up. ${[self.newVictims(TRUE)]&" "}`
-		self.message = []
-		session.actions += { self.n_victims = #session.victims }
-		
-		unless self.checkWin do
-			session.pushPlayers | p.state = "KILL" for p if [ p.state != "DEAD" ]
-			session.substate = "KILL"
-		done
-	}
-	function onKill player, target {
-		return FALSE if [ player.state != "KILL" ]
-		player.state = "WAIT"
-		self.vote += target
-		n_live := #session.players - #session.victims
-		if [ #self.vote = n_live ] do
-			self.vote | unorderedCount | for p, i do
-				if [ i > n_live/2 ] do
-					p.state = "DEAD"
-					session.victims += p
-					self.message += `${p.name} was killed. Their role was ${p.role}.`
-					break
-				done
-			done
-			session.substate = "OUTRO"
-			self.vote = []
-		done
-		return TRUE
-	}
-	function onOutro {
-		session.broadcasts += self.message&" "
-		unless self.checkWin do
-			session.pushPlayers | p.state = "SLEEP" for p if [ p.state != "DEAD" ]
-			session.broadcasts += "Everybody sleeps."
-			session.substate = "END"
-		done
-	}
 }
 
 record CommandController : http.Controller {
@@ -565,15 +326,15 @@ record CommandController : http.Controller {
 record GameController : http.Controller {
 	@http.handle "/game/new"
 	function handleNew request {
-		request.sendFile mimeType("gm.html"), "gm.html"
+		request.sendFile mimeType("views/gm.html"), "views/gm.html"
 	}
 	@http.handle "/game/player\\?sid=\\d+"
 	function handleJoin request {
-		request.sendFile mimeType("player.html"), "player.html"
+		request.sendFile mimeType("views/player.html"), "views/player.html"
 	}
 	@http.handle "/game/index"
 	function handleIndex request {
-		request.sendFile mimeType("index.html"), "index.html"
+		request.sendFile mimeType("views/index.html"), "views/index.html"
 	}
 
 	function handle request {

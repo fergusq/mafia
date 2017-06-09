@@ -1,0 +1,49 @@
+{
+	/*     Role           Party */
+	roles["DETECTIVE"] = "TOWN"
+}
+
+record DetectiveState(session) : State(session) {
+	name : string = "INVESTIGATION"
+	function pushDetective {
+		session.pushPlayers | { push p for p if [ p.role = "DETECTIVE" ] }
+	}
+	function gmText {
+		return `It's night. The detective wakes up.`
+	}
+	function killTexts {
+		return "Select target.", "You will be told if the target is a member of the mafia."
+	}
+	function onIntro {
+		player := self.pushDetective()
+		if [ player.state = "DEAD" ] do
+			session.broadcasts += "The detective is dead."
+			session.substate = "END"
+			return
+		done
+		session.broadcasts += "The detective wakes up."
+		player.state = "KILL"
+		session.substate = "KILL"
+	}
+	function onKill player, target {
+		return FALSE unless [ player.role = "DETECTIVE" and player.state = "KILL" ]
+		session.substate = "INFO"
+		player.state = "INFO"
+		player.info = `${target.name} is MAFIA.` if [ target.role = "MAFIA" ]
+		player.info = `${target.name} is NOT MAFIA.` if [ target.role != "MAFIA" ]
+		return TRUE
+	}
+	function onOK player {
+		return FALSE unless [ player.role = "DETECTIVE" and player.state = "INFO" ]
+		session.substate = "OUTRO"
+		player.state = "WAIT"
+		player.info = ""
+		return TRUE
+	}
+	function onOutro {
+		player := self.pushDetective()
+		player.state = "SLEEP"
+		session.broadcasts += "The detective sleeps."
+		session.substate = "END"
+	}
+}

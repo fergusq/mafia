@@ -1,0 +1,41 @@
+{
+	/*     Role        Party */
+	roles["DOCTOR"] = "TOWN"
+}
+
+record DoctorState(session) : State(session) {
+	name : string = "DOCTOR HEALS"
+	function pushDoctor {
+		session.pushPlayers | { push p for p if [ p.role = "DOCTOR" ] }
+	}
+	function gmText {
+		return `It's night. The doctor wakes up and heals.`
+	}
+	function killTexts {
+		return "Select target.", "The person you choose cannot die during this night."
+	}
+	function onIntro {
+		player := self.pushDoctor()
+		if [ player.state = "DEAD" ] do
+			session.broadcasts += "The doctor is dead."
+			session.substate = "END"
+			return
+		done
+		session.broadcasts += "The doctor wakes up."
+		player.state = "KILL"
+		session.substate = "KILL"
+	}
+	function onKill player, target {
+		return FALSE unless [ player.role = "DOCTOR" and player.state = "KILL" ]
+		session.heal_list += target
+		session.substate = "OUTRO"
+		player.state = "WAIT"
+		return TRUE
+	}
+	function onOutro {
+		player := self.pushDoctor()
+		player.state = "SLEEP"
+		session.broadcasts += "The doctor sleeps."
+		session.substate = "END"
+	}
+}

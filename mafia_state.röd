@@ -1,0 +1,51 @@
+{
+	/*     Role       Party */
+	roles["MAFIA"] = "MAFIA"
+}
+
+record MafiaState(session) : State(session) {
+	name : string = "MAFIA KILLS"
+	vote : list = []
+	function pushMafia {
+		session.pushPlayers | { push p for p if [ p.role = "MAFIA" ] }
+	}
+	function gmText {
+		return `It's night. The mafia wakes up and kills.`
+	}
+	function killTexts {
+		return "Kill vote.", "Unanimous decision required."
+	}
+	function onIntro {
+		if self.pushMafia | [ _.state = "DEAD" ] do
+			session.broadcasts += "The mafia is dead."
+			session.substate = "END"
+		else
+			session.broadcasts += "The mafia wakes up."
+			self.pushMafia | p.state = "KILL" for p if [ p.state != "DEAD" ]
+			session.substate = "KILL"
+		done
+	}
+	function onKill player, target {
+		return FALSE if [ player.state != "KILL" ]
+		player.state = "WAIT"
+		self.vote += target
+		n_mafia := #[session.pushPlayers() | filter { |p|; [p.role = "MAFIA" and p.state != "DEAD"] }]
+		errprint "Mafia kills: "..self.vote..", n="..n_mafia
+		if [ #self.vote = n_mafia ] do
+			self.vote | unorderedCount | pull p, i
+			if [ i = n_mafia ] do
+				session.kill_list += p
+				session.substate = "OUTRO"
+			else
+				self.pushMafia | p.state = "KILL" for p if [ p.state != "DEAD" ]	
+			done
+			self.vote = []
+		done
+		return TRUE
+	}
+	function onOutro {
+		self.pushMafia | p.state = "SLEEP" for p if [ p.state != "DEAD" ]
+		session.broadcasts += "The mafia sleeps."
+		session.substate = "END"
+	}
+}

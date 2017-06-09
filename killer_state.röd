@@ -1,0 +1,41 @@
+{
+	/*     Role        Party */
+	roles["KILLER"] = "KILLER"
+}
+
+record KillerState(session) : State(session) {
+	name : string = "KILLER KILLS"
+	function pushKiller {
+		session.pushPlayers | { push p for p if [ p.role = "KILLER" ] }
+	}
+	function gmText {
+		return `It's night. The killer wakes up and kills.`
+	}
+	function killTexts {
+		return "Select target.", "The selected person will be killed."
+	}
+	function onIntro {
+		killer := self.pushKiller()
+		if [ killer.state = "DEAD" ] do
+			session.broadcasts += "The killer is dead."
+			session.substate = "END"
+			return
+		done
+		session.broadcasts += "The killer wakes up."
+		killer.state = "KILL"
+		session.substate = "KILL"
+	}
+	function onKill player, target {
+		return FALSE unless [ player.role = "KILLER" and player.state = "KILL" ]
+		session.kill_list += target
+		session.substate = "OUTRO"
+		player.state = "WAIT"
+		return TRUE
+	}
+	function onOutro {
+		killer := self.pushKiller()
+		killer.state = "SLEEP"
+		session.broadcasts += "The killer sleeps."
+		session.substate = "END"
+	}
+}
