@@ -370,8 +370,12 @@ record StaticController : http.Controller {
 	}
 }
 
-main {	
-	hs := new http.HttpServer(25565)
+dateTime {
+	{} | bufferedExec "date", "+%d.%m.%Y/%H:%M" | head
+}
+
+main port {	
+	hs := new http.HttpServer(parseInteger(port))
 	hs.controllers["/"] = http.controller({ |request|
 		request.redirect "/game/index"
 	})
@@ -382,7 +386,7 @@ main {
 	hs.controllers["/game"] = new GameController
 	hs.controllers["/cmd"] = new CommandController
 	
-	date = "["..[bufferedExec("date", "+%d.%m.%Y/%H:%M")][0].."]"
+	date = "["..dateTime().."]"
 	print date.." Started."
 	while true; do
 		hs.update
